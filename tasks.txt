@@ -1,0 +1,6 @@
+short_task_0 0 1019
+short_task_1 0 1313
+med_task_0 1 4213
+med_task_1 1 5786
+long_task_0 2 25888
+long_task_1 2 11978
