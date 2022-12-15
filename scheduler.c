@@ -2,7 +2,7 @@
 // NAME: Rolf Olayan
 // STUDENT NUMBER: #7842749
 // COURSE: COMP 4300
-// Final Project
+// Final Project - SJF versus MLFQ scheduling
 //-----------------------------------------
 
 #include <stdio.h>
@@ -24,6 +24,8 @@
 #define MEDIUM 2
 #define LOW 3
 #define RESET_INTERVAL 5000
+#define SJF_POLICY 123
+#define MLFQ_POLICY 321
 
 typedef struct NODE {
 	char* task_name;
@@ -41,56 +43,92 @@ typedef struct QUEUE {
 } Queue;
 
 void user_prompts();
-void load_tasks_sjf(FILE *task_file);
-void load_tasks_mlfq(FILE *task_file);
+void load_tasks(FILE *task_file);
 static void* task_driver();
-void simulate_sjf();
-void simulate_mlfq();
+void simulate();
 void handle_task(Node* task);
 void mlfq_reset_priority();
-void mlfq_next_job(Node* processed_task);
+void mlfq_next_task(Node* processed_task);
 void log_response_time(Node* task);
 void log_turnaround_time(Node* task);
 void print_statistics();
-void initialize_queue(int priority, Node* node);
-void insert_at_end(int priority, Node* node);
+void initialize_queue(int priority, Node* task);
+void insert_at_end(int priority, Node* task);
 int not_empty(int priority);
 int is_first_task(int priority, Node* task);
 static void microsleep(unsigned int usecs);
 struct timespec diff(struct timespec start, struct timespec end);
 
-//Time variables
+// Time variables
 long type0_turnaround_time;
 long type1_turnaround_time;
 long type2_turnaround_time;
-
 long type0_response_time;
 long type1_response_time;
 long type2_response_time;
 
+// Used when calculating the time averages
 int type0_count;
 int type1_count;
 int type2_count;
 
-//Used to hold the tasks
+// Used to hold the tasks
+Node* curr_task;
 Node* sjf_list;
 Queue* high_priority;
 Queue* med_priority;
 Queue* low_priority;
-Node* curr_task;
 
-//Lock and conditional variable
+// Lock and conditional variable
 pthread_cond_t need_work = PTHREAD_COND_INITIALIZER;
-pthread_cond_t doing_work = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t main_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
+// Thread/algorithm variables
 int active_threads;
 int scheduler_on;
 int policy_mode;
 int reset_priority = RESET_INTERVAL;
-
 struct timespec arrival;
+
+int main(int argc, char *argv[])
+{
+	(void)argc;
+	(void)argv;
+	FILE *task_file = fopen("tasks.txt", "r");
+	assert(task_file != NULL);
+	
+	if (task_file != NULL)
+	{
+		// Initializes the lists and queues
+		sjf_list = NULL;		
+		high_priority = malloc(sizeof(Queue));
+		med_priority = malloc(sizeof(Queue));
+		low_priority = malloc(sizeof(Queue));
+		initialize_queue(HIGH, NULL);
+		initialize_queue(MEDIUM, NULL);
+		initialize_queue(LOW, NULL);
+		
+		// Prompts the user for their requested scheduling policy
+		user_prompts();
+
+		// Gets the arrival (start) time of the program
+		// Used for calculating the response time
+		clock_gettime(CLOCK_REALTIME, &arrival);
+		system("clear");
+		
+		// Loads in the tasks from the file and conducts the simulation
+		load_tasks(task_file);		
+		simulate();
+
+		// Prints the statistics at the end and closes the file
+		print_statistics();
+		fclose(task_file);
+	}
+	
+	printf("\nProgram completed successfully.\nProgrammed by Rolf Olayan.\n\n");
+    return EXIT_SUCCESS;
+}
 
 // Used to prompt user for their desired simulation settings
 void user_prompts()
@@ -105,76 +143,46 @@ void user_prompts()
 		user_input = getchar();
 		if (user_input == '1' || user_input == '2')
 		{
-			policy_mode = user_input - '0';
+			if (user_input == '1')
+			{
+				policy_mode = SJF_POLICY;
+			}
+			else if (user_input == '2')
+			{
+				policy_mode = MLFQ_POLICY;
+			}
+
 			break;
 		}
 	}
 }
 
-int main(int argc, char *argv[])
-{
-	(void)argc;
-	(void)argv;
-	FILE *task_file = fopen("tasks.txt", "r");
-	assert(task_file != NULL);
-	
-	if (task_file != NULL)
-	{
-		sjf_list = NULL;		
-		high_priority = malloc(sizeof(Queue));
-		med_priority = malloc(sizeof(Queue));
-		low_priority = malloc(sizeof(Queue));
-		initialize_queue(HIGH, NULL);
-		initialize_queue(MEDIUM, NULL);
-		initialize_queue(LOW, NULL);
-		
-		user_prompts();
-		clock_gettime(CLOCK_REALTIME, &arrival);
-		system("clear");
-		
-		if (policy_mode == 1) //When using the SJF policy
-		{
-			load_tasks_sjf(task_file);
-			simulate_sjf();
-		}
-		else if (policy_mode == 2) //When using the MLFQ policy
-		{
-			load_tasks_mlfq(task_file);
-			simulate_mlfq();
-		}
-		
-		print_statistics();
-		fclose(task_file);
-	}
-	
-	printf("\nProgram completed successfully.\nProgrammed by Rolf Olayan.\n\n");
-    return EXIT_SUCCESS;
-}
-
-//Loads all the tasks into the list, sorted by the task length
-void load_tasks_sjf(FILE *task_file)
+// Loads all the tasks into the appropriate lists or queues, depending on the scheduling policy
+void load_tasks(FILE *task_file)
 {
 	char buffer[BUFFER_SIZE];
 	char delim[] = " ";
 	
 	while (fgets(buffer, BUFFER_SIZE, task_file))
 	{
+		Node* new_task = malloc(sizeof(Node));
 		Node* curr = sjf_list;
 		Node* next = NULL;
-		Node* new_node = malloc(sizeof(Node));
 		
 		char* token = strtok(buffer, delim);
-		new_node->task_name = malloc(sizeof(token));
-		strcpy(new_node->task_name, token);
+		new_task->task_name = malloc(sizeof(token));
+		strcpy(new_task->task_name, token);
 		
 		token = strtok(NULL, delim);
-		new_node->task_type = atoi(token);
-
-		if (new_node->task_type == 0)
+		new_task->task_type = atoi(token);
+		
+		// Counts the number of each task type (small/medium/long).
+		// Used when calculating the average times of each type.
+		if (new_task->task_type == 0)
 		{
 			type0_count++;
 		}
-		else if (new_node->task_type == 1)
+		else if (new_task->task_type == 1)
 		{
 			type1_count++;
 		}
@@ -184,81 +192,57 @@ void load_tasks_sjf(FILE *task_file)
 		}
 		
 		token = strtok(NULL, delim);
-		new_node->task_length = atoi(token);
-		new_node->response_time = -1;
+		new_task->task_length = atoi(token);
+		new_task->response_time = -1;
+		new_task->time_allotment = MAX_ALLOTMENT;
 		
-		if (curr == NULL) //First node
+		if (policy_mode == SJF_POLICY)
 		{
-			sjf_list = new_node;
-		}
-		else //Loops through the list until the appropriate spot is found
-		{
-			next = (Node*)curr->next;
-			
-			while (next != NULL && new_node->task_length > next->task_length)
+			if (curr == NULL) //First task
 			{
-				curr = next;
+				sjf_list = new_task;
+			}
+			else //Loops through the list until the appropriate spot is found
+			{
 				next = (Node*)curr->next;
+				
+				while (next != NULL && new_task->task_length > next->task_length)
+				{
+					curr = next;
+					next = (Node*)curr->next;
+				}
+				
+				if (new_task->task_length < curr->task_length && strcmp(curr->task_name, sjf_list->task_name) == 0)
+				{
+					new_task->next = (struct Node*)curr;
+					sjf_list = new_task;
+				}
+				else
+				{
+					curr->next = (struct Node*)new_task;
+					new_task->next = (struct Node*)next;
+				}
 			}
-			
-			if (new_node->task_length < curr->task_length && strcmp(curr->task_name, sjf_list->task_name) == 0)
-			{
-				new_node->next = (struct Node*)curr;
-				sjf_list = new_node;
-			}
-			else
-			{
-				curr->next = (struct Node*)new_node;
-				new_node->next = (struct Node*)next;
-			}
+		}
+		else if (policy_mode == MLFQ_POLICY)
+		{		
+			insert_at_end(HIGH, new_task);
 		}
 	}
 }
 
-//Loads all the tasks into the highest priority list on load
-void load_tasks_mlfq(FILE *task_file)
-{
-	char buffer[BUFFER_SIZE];
-	char delim[] = " ";
-	
-	while (fgets(buffer, BUFFER_SIZE, task_file))
-	{
-		Node* new_node = malloc(sizeof(Node));
-		
-		char* token = strtok(buffer, delim);
-		new_node->task_name = malloc(sizeof(token));
-		strcpy(new_node->task_name, token);
-		
-		token = strtok(NULL, delim);
-		new_node->task_type = atoi(token);
-		
-		if (new_node->task_type == 0)
-		{
-			type0_count++;
-		}
-		else if (new_node->task_type == 1)
-		{
-			type1_count++;
-		}
-		else
-		{
-			type2_count++;
-		}
-
-		token = strtok(NULL, delim);
-		new_node->task_length = atoi(token);
-		new_node->time_allotment = MAX_ALLOTMENT;		
-		new_node->response_time = -1;
-		
-		insert_at_end(HIGH, new_node);
-	}
-}
-
+// Used for the scheduling and processing of tasks
+//     - For the scheduler:
+//         - Signals the worker threads when there are available threads left
+//     - For the workers:
+//         - Logs the response and turnaround times
+//         - Handles the task
+//         - Updates the reference of curr_task for the task to be handled
 static void* task_driver()
 {
 	struct timespec completion, first_run;
 	
-	if (scheduler_on && active_threads <= MAX_THREADS) //Handles the scheduling/signalling
+	if (scheduler_on && active_threads < MAX_THREADS) //Handles the scheduling/signalling
 	{
 		pthread_mutex_lock(&main_lock);
 		pthread_cond_signal(&need_work);
@@ -270,17 +254,18 @@ static void* task_driver()
 		{
 			pthread_mutex_lock(&lock);
 			
+			// Loops until there's no tasks left
 			if (curr_task == NULL)
 			{
 				break;
 			}
 
-			while (active_threads == MAX_THREADS)
+			// Waits for the scheduler to signal when there are free threads available
+			while (active_threads >= MAX_THREADS)
 			{
 				pthread_cond_wait(&need_work, &lock);
 			}
 			
-			//Gets the current task and increments our position in the list
 			Node* process_task = curr_task;
 			pthread_mutex_unlock(&lock);
 			
@@ -297,33 +282,36 @@ static void* task_driver()
 					log_response_time(process_task);
 				}
 				
+				// Sends to task handler 
 				handle_task(process_task);
 				
 				//For logging the turnaround time
 				clock_gettime(CLOCK_REALTIME, &completion);
-				process_task->turnaround_time += 100;
-				// process_task->turnaround_time += diff(first_run, completion).tv_nsec/1000;
-								
-				if (policy_mode == 1)
+				process_task->turnaround_time += diff(first_run, completion).tv_nsec/1000;
+				
+				if (policy_mode == SJF_POLICY)
 				{
+					// Logs the turnaround time and gets the next task
 					log_turnaround_time(process_task);
 					curr_task = (Node*)curr_task->next;
 				}
-				else
+				else if (policy_mode == MLFQ_POLICY)
 				{
+					// Logs the turnaround time if the task is finished
 					if (process_task->task_length <= 0)
 					{
 						log_turnaround_time(process_task);
 					}
 
+					// Resets all tasks back to the highest priority after the set amount of time
 					if (reset_priority <= 0)
 					{
 						reset_priority = RESET_INTERVAL;
 						mlfq_reset_priority();
 					}
-					else
+					else // Else gets the next highest priority task
 					{
-						mlfq_next_job(process_task);
+						mlfq_next_task(process_task);
 					}
 				}
 				
@@ -336,60 +324,52 @@ static void* task_driver()
     return NULL;
 }
 
-//Simulates the SJF scheduling policy
-void simulate_sjf()
-{
-	printf("\nSimulating SJF with %d CPU(s)\n", MAX_THREADS);
+// Simulates the appropriate scheduling policy (SJF or MLFQ)
+void simulate()
+{														   
 	pthread_t workers[MAX_THREADS];
-	pthread_t scheduler;
-	curr_task = sjf_list;
+	pthread_t scheduler;	
 	
+	// Gets the first task depending on the scheduling policy
+	if (policy_mode == SJF_POLICY)
+	{
+		printf("\nSimulating SJF with %d CPU(s)\n", MAX_THREADS);
+		curr_task = sjf_list;
+	}
+	else if (policy_mode == MLFQ_POLICY)
+	{
+		printf("\nSimulating MLFQ with %d CPU(s)\n", MAX_THREADS);
+		curr_task = (Node*)high_priority->head;
+	}
+	
+	// Creates the worker threads
 	for (int i = 0; i < MAX_THREADS; i++)
 	{
 		pthread_create(&workers[i], NULL, task_driver, NULL);
 	}
 	
+	// Creates and turns on the scheduler thread
 	scheduler_on = 1;
 	while (curr_task != NULL)
 	{
 		pthread_create(&scheduler, NULL, task_driver, NULL);
 	}
 
-	// pthread_join(workers[0], NULL);
-	pthread_join(scheduler, NULL);	
-}
-
-//Simulates the MLFQ scheduling policy
-void simulate_mlfq()
-{
-	printf("\nSimulating MLFQ with %d CPU(s)\n", MAX_THREADS);
-	pthread_t workers[MAX_THREADS];
-	pthread_t scheduler;
-	curr_task = (Node*)high_priority->head;
-
-	for (int i = 0; i < MAX_THREADS; i++)
-	{
-		pthread_create(&workers[i], NULL, task_driver, NULL);
-	}
-	
-	scheduler_on = 1;
-	while (curr_task != NULL)
-	{
-		pthread_create(&scheduler, NULL, task_driver, NULL);
-	}
-
-	// pthread_join(workers[0], NULL);
 	pthread_join(scheduler, NULL);
 }
 
-//Handles tasks
+// Handles tasks
+//     - Simulates the tasks by sleeping for the appropriate length of time
+//         - For SJF, simply sleeps for the whole task length
+//         - For MLFQ, sleeps for the quantum time slice
+//             - Updates the remaining task length and time allotment (used for lowering task priority)
 void handle_task(Node* task)
 {
-	if (policy_mode == 1)
+	if (policy_mode == SJF_POLICY)
 	{
 		microsleep(task->task_length);
 	}
-	else if (policy_mode == 2)
+	else if (policy_mode == MLFQ_POLICY)
 	{
 		int remainder = task->task_length - TIME_SLICE;
 
@@ -410,6 +390,8 @@ void handle_task(Node* task)
 	}
 }
 
+// Handles the resetting of priority queues after the reset interval is reached (RESET_INTERVAL)
+//     - Moves all tasks from the MEDIUM and LOW priority queues into the HIGH queue
 void mlfq_reset_priority()
 {
 	Node* curr;
@@ -446,7 +428,11 @@ void mlfq_reset_priority()
 	curr_task = (Node*)high_priority->head;
 }
 
-void mlfq_next_job(Node* processed_task)
+// Handles the acquirement of the next task
+//     - Queues the processed task onto the end of the appropriate priority queue
+//     - Updates the priority queue of the processed task
+//     - Gets the next task from the highest non-empty priority queue
+void mlfq_next_task(Node* processed_task)
 {
 	if (not_empty(HIGH))
 	{
@@ -552,7 +538,7 @@ void mlfq_next_job(Node* processed_task)
 	}
 }
 
-//Stores the response times into the appropriate variables
+// Stores the response times into the appropriate variables
 void log_response_time(Node* task)
 {
 	if (task->task_type == 0)
@@ -569,7 +555,7 @@ void log_response_time(Node* task)
 	}
 }
 
-//Stores the turnaround times into the appropriate variables
+// Stores the turnaround times into the appropriate variables
 void log_turnaround_time(Node* task)
 {
 	if (task->task_type == 0)
@@ -586,7 +572,7 @@ void log_turnaround_time(Node* task)
 	}
 }
 
-//Prints out the average turnaround and average response times to the console
+// Prints out the average turnaround and average response times to the console
 void print_statistics()
 {
 	printf("\nAverage turnaround time per type:\n\n");
@@ -600,41 +586,43 @@ void print_statistics()
 	printf("  - Type 2 (Long):\t%ld usec\n", type2_response_time/type2_count);
 }
 
-void initialize_queue(int priority, Node* node)
+// Used to initialize a priority queue
+void initialize_queue(int priority, Node* task)
 {	
 	if (priority == HIGH)
 	{
-		high_priority->head = (struct Node*)node;
-		high_priority->tail = (struct Node*)node;
+		high_priority->head = (struct Node*)task;
+		high_priority->tail = (struct Node*)task;
 	}
 	else if (priority == MEDIUM)
 	{
-		med_priority->head = (struct Node*)node;
-		med_priority->tail = (struct Node*)node;
+		med_priority->head = (struct Node*)task;
+		med_priority->tail = (struct Node*)task;
 	}
 	else if (priority == LOW)
 	{
-		low_priority->head = (struct Node*)node;
-		low_priority->tail = (struct Node*)node;
+		low_priority->head = (struct Node*)task;
+		low_priority->tail = (struct Node*)task;
 	}	
 }
 
-void insert_at_end(int priority, Node* node)
+// Used to insert a task at the end of a priority queue
+void insert_at_end(int priority, Node* task)
 {
 	Node* end = NULL;
-	node->next = NULL;
+	task->next = NULL;
 	
 	if (priority == HIGH)
 	{
 		if (not_empty(HIGH))
 		{
 			end = (Node*)high_priority->tail;
-			end->next = (struct Node*)node;
-			high_priority->tail = (struct Node*)node;
+			end->next = (struct Node*)task;
+			high_priority->tail = (struct Node*)task;
 		}
 		else
 		{
-			initialize_queue(priority, node);
+			initialize_queue(priority, task);
 		}
 	}
 	else if (priority == MEDIUM)
@@ -642,12 +630,12 @@ void insert_at_end(int priority, Node* node)
 		if (not_empty(MEDIUM))
 		{
 			end = (Node*)med_priority->tail;
-			end->next = (struct Node*)node;
-			med_priority->tail = (struct Node*)node;
+			end->next = (struct Node*)task;
+			med_priority->tail = (struct Node*)task;
 		}
 		else
 		{
-			initialize_queue(priority, node);
+			initialize_queue(priority, task);
 		}
 	}
 	else if (priority == LOW)
@@ -655,16 +643,17 @@ void insert_at_end(int priority, Node* node)
 		if (not_empty(LOW))
 		{
 			end = (Node*)low_priority->tail;
-			end->next = (struct Node*)node;
-			low_priority->tail = (struct Node*)node;
+			end->next = (struct Node*)task;
+			low_priority->tail = (struct Node*)task;
 		}
 		else
 		{
-			initialize_queue(priority, node);
+			initialize_queue(priority, task);
 		}
 	}	
 }
 
+// Used to check whether a certain priority queue is empty or not
 int not_empty(int priority)
 {
 	int ret_val = 0;
@@ -685,6 +674,7 @@ int not_empty(int priority)
 	return ret_val;
 }
 
+// Used to check whether a task is at the top of a certain priority queue
 int is_first_task(int priority, Node* task)
 {
 	Node* head = NULL;
@@ -719,6 +709,7 @@ int is_first_task(int priority, Node* task)
 }
 
 // Used when "running tasks"
+// Implementation of microsleep adapted from Franklin Bristow lectures
 static void microsleep(unsigned int usecs)
 {
     long seconds = usecs / USEC_PER_SEC;
