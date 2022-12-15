@@ -18,7 +18,8 @@
 #define NANOS_PER_USEC 1000
 #define USEC_PER_SEC 1000000
 #define TIME_SLICE 50
-#define MAX_ALLOTMENT 200
+#define MAX_ALLOTMENT 50
+#define MAX_THREADS 4
 
 typedef struct NODE {
 	char* task_name;
@@ -27,7 +28,6 @@ typedef struct NODE {
 	int time_allotment;
 	long response_time;
 	long turnaround_time;
-	struct timespec first_run;
     struct Node* next;
 } Node;
 
@@ -73,7 +73,6 @@ pthread_cond_t doing_work = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t main_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
-int max_thread_num;
 int active_threads;
 int scheduler_on;
 int policy_mode;
@@ -89,25 +88,12 @@ void user_prompts()
 	while (1)
 	{
 		system("clear");
-		printf("Please specify the amount of CPU cores you want to simulate with (4/8):\n");
-		user_input = getchar();
-		if (user_input == '4' || user_input == '8')
-		{
-			max_thread_num = user_input - '0';
-			break;
-		}
-	}
-
-	while (1)
-	{
-		system("clear");
 		printf("Please specify which scheduling algorithm you want to simulate with:\n");
-		printf("> 0. SJF\n> 1. MLFQ\n");
+		printf("> 1. SJF\n> 2. MLFQ\n");
 		user_input = getchar();
-		if (user_input == '0' || user_input == '1')
+		if (user_input == '1' || user_input == '2')
 		{
 			policy_mode = user_input - '0';
-			system("clear");
 			break;
 		}
 	}
@@ -129,13 +115,14 @@ int main(int argc, char *argv[])
 		
 		user_prompts();
 		clock_gettime(CLOCK_REALTIME, &arrival);
+		system("clear");
 		
-		if (policy_mode == 0) //When using the SJF policy
+		if (policy_mode == 1) //When using the SJF policy
 		{
 			load_tasks_sjf(task_file);
 			simulate_sjf();
 		}
-		else if (policy_mode == 1) //When using the MLFQ policy
+		else if (policy_mode == 2) //When using the MLFQ policy
 		{
 			load_tasks_mlfq(task_file);
 			simulate_mlfq();
@@ -228,6 +215,8 @@ void load_tasks_mlfq(FILE *task_file)
 		
 		token = strtok(NULL, delim);
 		new_node->task_type = atoi(token);
+
+		new_node->response_time = -1;
 		
 		if (new_node->task_type == 0)
 		{
@@ -256,7 +245,7 @@ static void* sjf_task_driver()
 {
 	struct timespec completion, first_run;
 	
-	if (scheduler_on && active_threads <= max_thread_num) //Handles the scheduling/signalling
+	if (scheduler_on && active_threads <= MAX_THREADS) //Handles the scheduling/signalling
 	{
 		pthread_mutex_lock(&main_lock);
 		pthread_cond_signal(&need_work);
@@ -268,7 +257,7 @@ static void* sjf_task_driver()
 		{
 			pthread_mutex_lock(&lock);
 
-			while (active_threads == max_thread_num)
+			while (active_threads == MAX_THREADS)
 			{
 				pthread_cond_wait(&need_work, &lock);
 			}
@@ -311,7 +300,7 @@ static void* mlfq_task_driver()
 {
 	struct timespec completion, first_run;
 	
-	if (scheduler_on && active_threads <= max_thread_num) //Handles the scheduling/signalling
+	if (scheduler_on && active_threads <= MAX_THREADS) //Handles the scheduling/signalling
 	{
 		pthread_mutex_lock(&main_lock);
 		pthread_cond_signal(&need_work);
@@ -323,50 +312,50 @@ static void* mlfq_task_driver()
 		{
 			pthread_mutex_lock(&lock);
 			
-			while (active_threads == max_thread_num)
-			{
-				pthread_cond_wait(&need_work, &lock);
-			}
-
 			if (curr_task == NULL)
 			{
 				break;
+			}
+
+			while (active_threads == MAX_THREADS)
+			{
+				pthread_cond_wait(&need_work, &lock);
 			}
 			
 			//Gets the current task and increments our position in the list
 			Node* process_task = curr_task;
 			pthread_mutex_unlock(&lock);
-			curr_task = (Node*)curr_task->next;	
 
 			if (process_task != NULL)
 			{
 				pthread_mutex_lock(&lock);
 				active_threads++;
-				curr_task = (Node*)curr_task->next;
+
 				//Logs the response time
-				clock_gettime(CLOCK_REALTIME, &first_run);
-				process_task->response_time = diff(arrival, first_run).tv_nsec/1000;
-				log_response_time(process_task);
+				if (process_task->response_time == -1)
+				{
+					clock_gettime(CLOCK_REALTIME, &first_run);
+					process_task->response_time = diff(arrival, first_run).tv_nsec/1000;
+					log_response_time(process_task);
+				}
 				
 				handle_task(process_task);
 
 				clock_gettime(CLOCK_REALTIME, &completion);
-				process_task->turnaround_time = diff(first_run, completion).tv_nsec/1000;
-				printf("%ld\n", process_task->turnaround_time);
+				process_task->turnaround_time += diff(first_run, completion).tv_nsec/1000;
 				
 				if (process_task->task_length <= 0)
 				{
-					clock_gettime(CLOCK_REALTIME, &completion);
-					process_task->turnaround_time = diff(first_run, completion).tv_nsec/1000;
 					log_turnaround_time(process_task);
 				}
 
-				// if (reset_priority <= 2000)
+				// if (reset_priority <= 0)
 				// {
 				// 	mlfq_reset_priority();
+				// 	reset_priority = 2000;
 				// }
 
-				// mlfq_next_job(process_task);
+				mlfq_next_job(process_task);
 				active_threads--;
 				pthread_mutex_unlock(&lock);
 			}
@@ -386,6 +375,12 @@ void mlfq_reset_priority()
 		while (curr != NULL)
 		{
 			insert_at_end(high_priority, curr);
+
+			if (high_priority == NULL)
+			{
+				high_priority = curr;
+			}
+
 			curr = (Node*)curr->next;
 		}
 	}
@@ -396,9 +391,18 @@ void mlfq_reset_priority()
 		while (curr != NULL)
 		{
 			insert_at_end(high_priority, curr);
+			
+			if (high_priority == NULL)
+			{
+				high_priority = curr;
+			}
+
 			curr = (Node*)curr->next;
 		}
 	}
+
+	med_priority = NULL;
+	low_priority = NULL;
 }
 
 void mlfq_next_job(Node* processed_task)
@@ -408,14 +412,31 @@ void mlfq_next_job(Node* processed_task)
 		if (strcmp(high_priority->task_name, processed_task->task_name) == 0)
 		{
 			high_priority = (Node*)processed_task->next;
-			curr_task = high_priority;
-			if (processed_task->time_allotment > 0)
+
+			if (high_priority != NULL)
 			{
-				insert_at_end(high_priority, processed_task);
+				curr_task = high_priority;
 			}
 			else
 			{
-				insert_at_end(med_priority, processed_task);
+				curr_task = med_priority;
+			}
+
+			if (processed_task->task_length > 0)
+			{
+				if (processed_task->time_allotment > 0)
+				{
+					insert_at_end(high_priority, processed_task);
+				}
+				else
+				{
+					processed_task->time_allotment = MAX_ALLOTMENT;
+					insert_at_end(med_priority, processed_task);
+					if (med_priority == NULL)
+					{
+						med_priority = processed_task;
+					}
+				}
 			}
 		}
 		else
@@ -428,14 +449,31 @@ void mlfq_next_job(Node* processed_task)
 		if (strcmp(med_priority->task_name, processed_task->task_name) == 0)
 		{
 			med_priority = (Node*)processed_task->next;
-			curr_task = med_priority;
-			if (processed_task->time_allotment > 0)
+			
+			if (med_priority != NULL)
 			{
-				insert_at_end(med_priority, processed_task);
+				curr_task = med_priority;
 			}
 			else
 			{
-				insert_at_end(low_priority, processed_task);
+				curr_task = low_priority;
+			}
+
+			if (processed_task->task_length > 0)
+			{
+				if (processed_task->time_allotment > 0)
+				{
+					insert_at_end(med_priority, processed_task);
+				}
+				else
+				{
+					insert_at_end(low_priority, processed_task);
+					processed_task->time_allotment = MAX_ALLOTMENT;
+					if (low_priority == NULL)
+					{
+						low_priority = processed_task;
+					}
+				}
 			}
 		}
 		else
@@ -449,7 +487,11 @@ void mlfq_next_job(Node* processed_task)
 		{
 			low_priority = (Node*)processed_task->next;
 			curr_task = low_priority;
-			insert_at_end(low_priority, processed_task);
+			
+			if (processed_task->task_length > 0)
+			{
+				insert_at_end(low_priority, processed_task);
+			}
 		}
 		else
 		{
@@ -461,12 +503,12 @@ void mlfq_next_job(Node* processed_task)
 //Simulates the SJF scheduling policy
 void simulate_sjf()
 {
-	printf("\nUsing SJF with %d CPU(s)\n", max_thread_num);
-	pthread_t workers[max_thread_num];
+	printf("\nSimulating SJF with %d CPU(s)\n", MAX_THREADS);
+	pthread_t workers[MAX_THREADS];
 	pthread_t scheduler;
 	curr_task = sjf_list;
 	
-	for (int i = 0; i < max_thread_num; i++)
+	for (int i = 0; i < MAX_THREADS; i++)
 	{
 		pthread_create(&workers[i], NULL, sjf_task_driver, NULL);
 	}
@@ -484,12 +526,12 @@ void simulate_sjf()
 //Simulates the MLFQ scheduling policy
 void simulate_mlfq()
 {
-	printf("\nUsing MLFQ with %d CPU(s)\n", max_thread_num);
-	pthread_t workers[max_thread_num];
+	printf("\nSimulating MLFQ with %d CPU(s)\n", MAX_THREADS);
+	pthread_t workers[MAX_THREADS];
 	pthread_t scheduler;
 	curr_task = high_priority;
 
-	for (int i = 0; i < max_thread_num; i++)
+	for (int i = 0; i < MAX_THREADS; i++)
 	{
 		pthread_create(&workers[i], NULL, mlfq_task_driver, NULL);
 	}
@@ -519,7 +561,6 @@ void log_turnaround_time(Node* task)
 	{
 		type2_turnaround_time += task->turnaround_time;
 	}
-	printf("%ld, %ld, %ld\n",type0_turnaround_time, type1_turnaround_time, type2_turnaround_time);
 }
 
 //Stores the response times into the appropriate variables
@@ -572,11 +613,11 @@ static void microsleep(unsigned int usecs)
 //Handles tasks
 void handle_task(Node* task)
 {
-	if (policy_mode == 0)
+	if (policy_mode == 1)
 	{
 		microsleep(task->task_length);
 	}
-	else if (policy_mode == 1)
+	else if (policy_mode == 2)
 	{
 		int remainder = task->task_length - TIME_SLICE;
 
@@ -618,6 +659,7 @@ void insert_at_end(Node* head, Node* node)
 }
 
 // Used to calculate difference between start and end time (from "Profiling Code Using clock_gettime by Guy Rutenberg")
+// Source: https://www.guyrutenberg.com/2007/09/22/profiling-code-using-clock_gettime/
 struct timespec diff(struct timespec start, struct timespec end)
 {
 	struct timespec temp;
